@@ -3,7 +3,7 @@ import openpyxl
 import pandas as pd
 from pathlib import Path
 
-st.set_page_config(page_title="Scholarship Rubric", layout="wide")
+st.set_page_config(page_title="Scholarship Rubric")
 
 col_title, col_reset = st.columns([6, 1])
 col_title.title("Scholarship Application Rubric")
