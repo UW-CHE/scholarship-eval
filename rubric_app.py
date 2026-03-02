@@ -58,21 +58,18 @@ for section, subcat, descriptors in rubric:
         st.subheader(section)
         current_section = section
 
-    # N Terms gets a number input instead of score buttons
+    # N Terms gets a slider instead of score buttons
     if subcat == "N Terms":
-        col1, col2 = st.columns([2, 4])
-        col1.write("N Terms (graduate)")
-        n_terms = col2.number_input(
-            "Number of completed graduate terms",
+        n_terms = st.slider(
+            "N Terms (graduate)",
             min_value=1,
             max_value=20,
             value=6,
             step=1,
-            label_visibility="collapsed",
             key="n_terms",
         )
         W = terms_weight(n_terms)
-        col2.caption(
+        st.caption(
             f"Weight applied to Publications, Other Contributions, Conferences, "
             f"and Research Awards: **{W:.2f}×**"
         )
