@@ -5,7 +5,13 @@ from pathlib import Path
 
 st.set_page_config(page_title="Scholarship Rubric", layout="wide")
 
-st.title("Scholarship Application Rubric")
+col_title, col_reset = st.columns([6, 1])
+col_title.title("Scholarship Application Rubric")
+if col_reset.button("Reset", type="secondary", use_container_width=True):
+    for key in list(st.session_state.keys()):
+        if key.startswith("score_") or key == "n_terms":
+            del st.session_state[key]
+    st.rerun()
 
 RUBRIC_PATH = Path(__file__).parent / "rubric_template.xlsx"
 
