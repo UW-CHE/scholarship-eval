@@ -2,11 +2,13 @@ import streamlit as st
 import openpyxl
 from io import BytesIO, StringIO
 import csv
+from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Scholarship Rubric")
 
 WEIGHTS_STORAGE_KEY = "scholarship-rubric-weights-v1"
+EVALUATIONS_STORAGE_KEY = "scholarship-rubric-evaluations-v1"
 
 # This trusted, app-owned component keeps preferences on the visitor's device.
 # It contains no user-provided content and sends only the saved weight values to
@@ -41,6 +43,54 @@ WEIGHT_STORAGE_COMPONENT = st.components.v2.component(
     """,
 )
 
+# Evaluations are also kept only in the visitor's browser. A record is replaced
+# when its student key matches an existing record, allowing corrections without
+# duplicate rows in the downloaded file.
+EVALUATION_STORAGE_COMPONENT = st.components.v2.component(
+    "rubric_evaluation_storage",
+    js="""
+    export default function({ data, setStateValue }) {
+        const storageKey = data.storageKey;
+        try {
+            if (data.clear) {
+                window.localStorage.removeItem(storageKey);
+                setStateValue("records", []);
+                return;
+            }
+
+            if (data.record) {
+                const records = JSON.parse(
+                    window.localStorage.getItem(storageKey) || "[]"
+                );
+                const safeRecords = Array.isArray(records) ? records : [];
+                const existingIndex = safeRecords.findIndex(
+                    (item) => item.studentKey === data.record.studentKey
+                );
+                if (existingIndex === -1) {
+                    safeRecords.push(data.record);
+                } else {
+                    safeRecords[existingIndex] = data.record;
+                }
+                window.localStorage.setItem(storageKey, JSON.stringify(safeRecords));
+                setStateValue("records", safeRecords);
+                return;
+            }
+
+            if (!data.hydrated) {
+                const records = JSON.parse(
+                    window.localStorage.getItem(storageKey) || "[]"
+                );
+                setStateValue("records", Array.isArray(records) ? records : []);
+            }
+        } catch (error) {
+            // The rubric remains usable if localStorage is blocked by browser
+            // privacy settings; its results simply cannot persist after reload.
+            setStateValue("records", []);
+        }
+    }
+    """,
+)
+
 
 def reset_scores():
     for key in list(st.session_state.keys()):
@@ -56,9 +106,19 @@ def forget_saved_weights():
     st.session_state["weights_restored"] = False
 
 
+def mark_evaluation_saved():
+    if st.session_state.pop("pending_evaluation", None) is not None:
+        st.session_state["evaluation_save_notice"] = True
+
+
+def clear_saved_evaluations():
+    st.session_state["clear_saved_evaluations"] = True
+    st.session_state["evaluations_restored"] = False
+
+
 col_title, col_forget_weights, col_reset = st.columns([5, 1, 1])
 col_title.title("Scholarship Application Rubric")
-col_title.caption("Your weight preferences are saved in this browser.")
+col_title.caption("Weight preferences and saved evaluations stay in this browser.")
 col_forget_weights.button(
     "Forget weights",
     type="secondary",
@@ -70,6 +130,11 @@ col_reset.button(
     type="secondary",
     use_container_width=True,
     on_click=reset_scores,
+)
+student_name = st.text_input(
+    "Student name or ID",
+    key="student_name",
+    placeholder="Enter a unique student name or identifier",
 )
 
 RUBRIC_PATH = Path(__file__).parent / "rubric_template.xlsx"
@@ -90,25 +155,36 @@ def load_rubric():
     return rubric
 
 
-def build_export_rows(rubric, scores):
-    """Create one Excel-friendly row for each rubric category."""
+def build_evaluation_record(student, scores, weighted_total, average_score, n_scored):
+    """Create one browser-stored, wide-format evaluation record."""
+    return {
+        "student": student.strip(),
+        "studentKey": student.strip().casefold(),
+        "scores": scores,
+        "weightedTotal": weighted_total,
+        "averageScore": average_score,
+        "categoriesScored": n_scored,
+        "savedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def build_output_rows(records, metrics):
+    """Turn stored evaluation records into rows for CSV and Excel downloads."""
     rows = []
-    for section, subcat, _ in rubric:
-        score = scores.get(subcat)
-        section_weight = st.session_state.get(f"weight_section_{section}", 1.0)
-        category_weight = st.session_state.get(f"weight_cat_{subcat}", 1.0)
-        rows.append(
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("scores"), dict):
+            continue
+        row = {"Student": record.get("student", "")}
+        row.update({metric: record["scores"].get(metric, "") for metric in metrics})
+        row.update(
             {
-                "Section": section,
-                "Category": subcat,
-                "Score": "" if score is None else score,
-                "Category weight": category_weight,
-                "Section weight": section_weight,
-                "Weighted contribution": ""
-                if score is None
-                else section_weight * category_weight * score,
+                "Weighted Score": record.get("weightedTotal", ""),
+                "Average Score": record.get("averageScore", ""),
+                "Categories Scored": record.get("categoriesScored", ""),
+                "Saved At": record.get("savedAt", ""),
             }
         )
+        rows.append(row)
     return rows
 
 
@@ -121,12 +197,11 @@ def make_csv(rows, fieldnames):
     return buffer.getvalue().encode("utf-8-sig")
 
 
-def make_workbook(rows, weighted_total, average_score, n_scored, n_total):
+def make_workbook(rows, headers):
     workbook = openpyxl.Workbook()
     scores_sheet = workbook.active
-    scores_sheet.title = "Scores"
+    scores_sheet.title = "Evaluations"
 
-    headers = list(rows[0].keys()) if rows else []
     scores_sheet.append(headers)
     for row in rows:
         scores_sheet.append([row[header] for header in headers])
@@ -137,17 +212,6 @@ def make_workbook(rows, weighted_total, average_score, n_scored, n_total):
     for column_cells in scores_sheet.columns:
         width = max(len(str(cell.value or "")) for cell in column_cells)
         scores_sheet.column_dimensions[column_cells[0].column_letter].width = min(width + 2, 40)
-
-    summary_sheet = workbook.create_sheet("Summary")
-    summary_sheet.append(["Metric", "Value"])
-    summary_sheet.append(["Weighted score", weighted_total])
-    summary_sheet.append(["Average score", average_score if average_score is not None else ""])
-    summary_sheet.append(["Categories scored", n_scored])
-    summary_sheet.append(["Categories available", n_total])
-    for cell in summary_sheet[1]:
-        cell.font = openpyxl.styles.Font(bold=True)
-    summary_sheet.column_dimensions["A"].width = 24
-    summary_sheet.column_dimensions["B"].width = 18
 
     buffer = BytesIO()
     workbook.save(buffer)
@@ -294,44 +358,78 @@ c1.metric("Weighted Score", f"{weighted_total:.2f}")
 c2.metric("Average Score", f"{average_score:.2f}" if average_score is not None else "—")
 c3.metric("Categories Scored", f"{n_scored} / {n_total}")
 
-# ── Export ────────────────────────────────────────────────────────────────────
+# ── Saved evaluation output ───────────────────────────────────────────────────
 st.divider()
-st.subheader("Export scores")
-
-export_rows = build_export_rows(rubric, scores)
-export_headers = list(export_rows[0].keys()) if export_rows else []
-
-# Tabs are the native column separator for a direct paste into Excel or Sheets.
-tsv_buffer = StringIO(newline="")
-tsv_writer = csv.DictWriter(
-    tsv_buffer, fieldnames=export_headers, delimiter="\t", lineterminator="\n"
-)
-tsv_writer.writeheader()
-tsv_writer.writerows(export_rows)
-tab_separated_scores = tsv_buffer.getvalue()
-
+st.subheader("Saved evaluations")
 st.caption(
-    "Copy the complete block below (including its header row), then paste into cell A1 "
-    "in Excel or Google Sheets. Tabs place each field in its own column."
+    "Save one row per student, then download the accumulated results. Records stay "
+    "in this browser until you clear them or clear this site's browser data."
 )
-st.code(tab_separated_scores, language=None)
 
-csv_bytes = make_csv(export_rows, export_headers)
-workbook_bytes = make_workbook(
-    export_rows, weighted_total, average_score, n_scored, n_total
+metric_columns = [subcat for _, subcat, _ in rubric]
+output_headers = [
+    "Student",
+    *metric_columns,
+    "Weighted Score",
+    "Average Score",
+    "Categories Scored",
+    "Saved At",
+]
+stored_records = st.session_state.get("rubric_evaluation_storage", {}).get("records")
+if stored_records is not None and not st.session_state.get("evaluations_restored", False):
+    st.session_state["evaluations_restored"] = True
+if not isinstance(stored_records, list):
+    stored_records = []
+
+if st.session_state.pop("evaluation_save_notice", False):
+    st.success("Evaluation saved in this browser. Saving the same student again updates their row.")
+
+save_col, clear_col = st.columns(2)
+if save_col.button("Save current evaluation", type="primary", use_container_width=True):
+    if not student_name.strip():
+        st.warning("Enter a student name or ID before saving an evaluation.")
+    else:
+        st.session_state["pending_evaluation"] = build_evaluation_record(
+            student_name, scores, weighted_total, average_score, n_scored
+        )
+if clear_col.button(
+    "Clear saved evaluations", type="secondary", use_container_width=True
+):
+    clear_saved_evaluations()
+
+clear_saved_evaluations_request = st.session_state.pop("clear_saved_evaluations", False)
+EVALUATION_STORAGE_COMPONENT(
+    data={
+        "storageKey": EVALUATIONS_STORAGE_KEY,
+        "clear": clear_saved_evaluations_request,
+        "hydrated": st.session_state.get("evaluations_restored", False),
+        "record": st.session_state.get("pending_evaluation"),
+    },
+    default={"records": None},
+    key="rubric_evaluation_storage",
+    on_records_change=mark_evaluation_saved,
+    height=0,
 )
-download_csv, download_xlsx = st.columns(2)
-download_csv.download_button(
-    "Download CSV",
-    data=csv_bytes,
-    file_name="scholarship-rubric-scores.csv",
-    mime="text/csv",
-    use_container_width=True,
-)
-download_xlsx.download_button(
-    "Download Excel workbook",
-    data=workbook_bytes,
-    file_name="scholarship-rubric-scores.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
-)
+
+output_rows = build_output_rows(stored_records, metric_columns)
+st.caption(f"{len(output_rows)} saved evaluation{'s' if len(output_rows) != 1 else ''}")
+if output_rows:
+    st.dataframe(output_rows, use_container_width=True, hide_index=True)
+
+    csv_bytes = make_csv(output_rows, output_headers)
+    workbook_bytes = make_workbook(output_rows, output_headers)
+    download_csv, download_xlsx = st.columns(2)
+    download_csv.download_button(
+        "Download CSV",
+        data=csv_bytes,
+        file_name="scholarship-evaluations.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    download_xlsx.download_button(
+        "Download Excel workbook",
+        data=workbook_bytes,
+        file_name="scholarship-evaluations.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
