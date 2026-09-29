@@ -116,6 +116,12 @@ def clear_saved_evaluations():
     st.session_state["evaluations_restored"] = False
 
 
+def set_score(score_key, score_value, evidence_category):
+    """Set a score and keep the matching evidence visible in the sidebar."""
+    st.session_state[score_key] = score_value
+    st.session_state["evidence_category"] = evidence_category
+
+
 col_title, col_forget_weights, col_reset = st.columns([5, 1, 1])
 col_title.title("Scholarship Application Rubric")
 col_title.caption("Weight preferences and saved evaluations stay in this browser.")
@@ -240,6 +246,25 @@ for section, subcat, descriptors in rubric:
         sections_map[section] = []
     sections_map[section].append((subcat, descriptors))
 
+# Hover tooltips can cover the score buttons. The sidebar provides the same
+# evidence without obstructing the scoring matrix and keeps the criteria for
+# the category most recently scored in view.
+evidence_by_category = {
+    f"{section} — {subcat}": descriptors for section, subcat, descriptors in rubric
+}
+evidence_categories = list(evidence_by_category)
+with st.sidebar:
+    st.header("Evidence guide")
+    st.caption("Choose a category to compare its evidence for each score.")
+    selected_evidence_category = st.selectbox(
+        "Rubric category",
+        evidence_categories,
+        key="evidence_category",
+    )
+    for score_value in [4, 3, 2, 1, 0]:
+        st.markdown(f"**Score {score_value}**")
+        st.write(evidence_by_category[selected_evidence_category].get(score_value) or "—")
+
 # Streamlit session state is tied to the current browser connection. Hydrate it
 # once from localStorage before any weight widget is created, then save the
 # current values to localStorage on each subsequent rerun.
@@ -289,6 +314,7 @@ for section in sections_order:
     for subcat, descriptors in sections_map[section]:
         score_key = f"score_{subcat}"
         weight_key = f"weight_cat_{subcat}"
+        evidence_category = f"{section} — {subcat}"
         if score_key not in st.session_state:
             st.session_state[score_key] = None
         if weight_key not in st.session_state:
@@ -302,10 +328,10 @@ for section in sections_order:
             col.button(
                 str(score_val),
                 key=f"btn_{subcat}_{score_val}",
-                help=descriptors.get(score_val) or "",
                 type="primary" if is_selected else "secondary",
                 use_container_width=True,
-                on_click=lambda k=score_key, v=score_val: st.session_state.update({k: v}),
+                on_click=set_score,
+                args=(score_key, score_val, evidence_category),
             )
 
         w_cat = cols[6].number_input(
